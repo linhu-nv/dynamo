@@ -447,8 +447,8 @@ async def _get_runtime_config(
                 f"Failed to attach SGLang spec decode runtime metadata: {e}"
             )
 
-    # KVCC HiCache backend: advertise this worker as a router-hint KV source.
-    # Local bounds, not model-card bounds: the KVCC control channel is per
+    # KVCR HiCache backend: advertise this worker as a router-hint KV source.
+    # Local bounds, not model-card bounds: the KVCR control channel is per
     # scheduler process, so only the ranks this node actually runs are dialable.
     enable_router_hint_support(
         runtime_config=runtime_config,

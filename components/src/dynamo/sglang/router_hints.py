@@ -10,10 +10,10 @@ hints.
 
 The only difference from the vLLM version is where the endpoints come from.
 vLLM reads ``kv_transfer_config.kv_connector_extra_config.secondary_tiers[]``;
-SGLang has no secondary tiers, so the equivalent values live in the KVCC
+SGLang has no secondary tiers, so the equivalent values live in the KVCR
 HiCache storage backend's extra-config JSON
 (``--hicache-storage-backend-extra-config``), whose ``control_host`` /
-``control_port`` / ``control_advertise_host`` fields are what the KVCC store
+``control_port`` / ``control_advertise_host`` fields are what the KVCR store
 binds its ZMQ peer control channel to.
 """
 
@@ -29,14 +29,14 @@ from dynamo.common.constants import (
 )
 
 # The HiCache storage backend that speaks the router-hint protocol.
-_KVCC_BACKEND_NAME = "kvcc"
+_KVCR_BACKEND_NAME = "kvcr"
 
 # Hosts that identify a bind-any wildcard rather than a reachable peer address.
 _UNROUTABLE_HOSTS = frozenset({"0.0.0.0", "::"})
 
 
 def _dp_port_stride(server_args: Any) -> int:
-    """How many KVCC control ports one attention-DP rank of this engine owns.
+    """How many KVCR control ports one attention-DP rank of this engine owns.
 
     Unlike vLLM, where the KV secondary tier lives in the one scheduler process
     per DP rank, SGLang builds a HiCache storage backend in *every* attention
@@ -52,7 +52,7 @@ def _dp_port_stride(server_args: Any) -> int:
     also the honest answer: the whole engine is one block.
 
     Must stay in step with ``_rank_port_offset`` in SGLang's
-    ``mem_cache/storage/kvcc/kvcc_store.py``; a mismatch does not fail, it makes
+    ``mem_cache/storage/kvcr/kvcr_store.py``; a mismatch does not fail, it makes
     peers dial the wrong rank and silently fetch the wrong attention shard.
     """
     dp_size = getattr(server_args, "dp_size", 1) or 1
@@ -121,9 +121,9 @@ def enable_router_hint_support(
     extra_config: dict[str, Any],
     dp_bounds: tuple[int, int],
 ) -> None:
-    """Advertise router-hint capability when this worker runs the KVCC backend.
+    """Advertise router-hint capability when this worker runs the KVCR backend.
 
-    No-op unless the KVCC HiCache storage backend is selected and configured to
+    No-op unless the KVCR HiCache storage backend is selected and configured to
     consume hints -- a worker without a remote-capable KV source has nothing to
     serve a peer from. Raises when the backend is configured for hints but its
     control endpoints are not advertisable, since that combination would
@@ -132,7 +132,7 @@ def enable_router_hint_support(
     Both runtime keys are set together: the router requires both, so publishing
     the capability flag alone would produce hints naming no endpoint.
     """
-    if getattr(server_args, "hicache_storage_backend", None) != _KVCC_BACKEND_NAME:
+    if getattr(server_args, "hicache_storage_backend", None) != _KVCR_BACKEND_NAME:
         return
     if not extra_config.get("enable_remote_hint"):
         return

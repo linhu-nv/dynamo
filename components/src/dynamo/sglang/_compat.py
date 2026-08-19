@@ -246,7 +246,7 @@ def router_hint_kwargs(engine: Any, request: Mapping[str, Any]) -> dict[str, Any
 
     The KV router attaches its hint under ``extra_args.kv_transfer_params``;
     SGLang consumes it as the ``kv_router_hint`` async_generate kwarg, which is
-    threaded down to the KVCC HiCache storage backend so it can pull the prefix
+    threaded down to the KVCR HiCache storage backend so it can pull the prefix
     from the named peer. An engine without that kwarg just recomputes the
     prefix, so a missing hint degrades rather than failing the request.
     """

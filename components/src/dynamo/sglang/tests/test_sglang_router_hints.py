@@ -26,12 +26,12 @@ pytestmark = [
 
 
 def _server_args(**overrides):
-    args = {"hicache_storage_backend": "kvcc"}
+    args = {"hicache_storage_backend": "kvcr"}
     args.update(overrides)
     return SimpleNamespace(**args)
 
 
-def _kvcc_config(**overrides):
+def _kvcr_config(**overrides):
     config = {
         "enable_remote_hint": True,
         "control_host": "0.0.0.0",
@@ -52,7 +52,7 @@ def test_publishes_single_dp_rank_endpoint():
     enable_router_hint_support(
         runtime_config=runtime_config,
         server_args=_server_args(),
-        extra_config=_kvcc_config(),
+        extra_config=_kvcr_config(),
         dp_bounds=(0, 1),
     )
 
@@ -73,7 +73,7 @@ def test_publishes_one_endpoint_per_dp_rank():
         server_args=_server_args(
             enable_dp_attention=True, dp_size=4, tp_size=4, nnodes=1, node_rank=0
         ),
-        extra_config=_kvcc_config(control_advertise_host="worker-a"),
+        extra_config=_kvcr_config(control_advertise_host="worker-a"),
         dp_bounds=(0, 4),
     )
 
@@ -90,13 +90,13 @@ def test_publishes_one_endpoint_per_dp_rank():
 def test_dp_ranks_are_strided_by_the_schedulers_each_one_owns():
     """A DP rank owns a *block* of ports, one per attention rank under it.
 
-    SGLang builds a KVCC store in every attention rank's scheduler process, all
+    SGLang builds a KVCR store in every attention rank's scheduler process, all
     offsetting the same configured base port by their own rank coordinate. At
     DP=2/TP=4 that is four schedulers laid out as ports P..P+3, so DP rank 1
     starts at P+2, not P+1. Advertising a bare DP rank here (which is what the
     vLLM module correctly does, since it has one scheduler per DP rank) would
     name a port belonging to DP rank 0's second attention rank -- and because
-    KVCC block keys are token hashes carrying no rank identity, the peer would
+    KVCR block keys are token hashes carrying no rank identity, the peer would
     accept the wrong attention shard instead of erroring.
     """
     runtime_config = MagicMock()
@@ -106,7 +106,7 @@ def test_dp_ranks_are_strided_by_the_schedulers_each_one_owns():
         server_args=_server_args(
             enable_dp_attention=True, dp_size=2, tp_size=4, nnodes=1, node_rank=0
         ),
-        extra_config=_kvcc_config(control_advertise_host="worker-a"),
+        extra_config=_kvcr_config(control_advertise_host="worker-a"),
         dp_bounds=(0, 2),
     )
 
@@ -132,7 +132,7 @@ def test_multinode_keys_global_dp_ranks_but_strides_from_the_local_base():
         server_args=_server_args(
             enable_dp_attention=True, dp_size=4, tp_size=8, nnodes=2, node_rank=1
         ),
-        extra_config=_kvcc_config(control_advertise_host="worker-b"),
+        extra_config=_kvcr_config(control_advertise_host="worker-b"),
         dp_bounds=(2, 4),
     )
 
@@ -163,7 +163,7 @@ def test_no_attention_dp_advertises_the_base_port_unstrided(server_args_override
     enable_router_hint_support(
         runtime_config=runtime_config,
         server_args=_server_args(**server_args_overrides),
-        extra_config=_kvcc_config(control_advertise_host="worker-a"),
+        extra_config=_kvcr_config(control_advertise_host="worker-a"),
         dp_bounds=(0, 1),
     )
 
@@ -178,7 +178,7 @@ def test_advertise_host_overrides_wildcard_bind_host():
     enable_router_hint_support(
         runtime_config=runtime_config,
         server_args=_server_args(),
-        extra_config=_kvcc_config(control_host="::"),
+        extra_config=_kvcr_config(control_host="::"),
         dp_bounds=(0, 1),
     )
 
@@ -194,11 +194,11 @@ def test_advertise_host_overrides_wildcard_bind_host():
     "server_args,extra_config",
     [
         # A different HiCache backend cannot serve a hint at all.
-        (_server_args(hicache_storage_backend="mooncake"), _kvcc_config()),
-        (_server_args(hicache_storage_backend=None), _kvcc_config()),
-        # KVCC without remote hints is local-only; advertising it would route
+        (_server_args(hicache_storage_backend="mooncake"), _kvcr_config()),
+        (_server_args(hicache_storage_backend=None), _kvcr_config()),
+        # KVCR without remote hints is local-only; advertising it would route
         # hints to a worker that will not act on them.
-        (_server_args(), _kvcc_config(enable_remote_hint=False)),
+        (_server_args(), _kvcr_config(enable_remote_hint=False)),
         (_server_args(), {}),
     ],
 )
@@ -238,7 +238,7 @@ def test_raises_when_endpoint_is_not_advertisable(overrides):
         enable_router_hint_support(
             runtime_config=MagicMock(),
             server_args=_server_args(),
-            extra_config=_kvcc_config(**overrides),
+            extra_config=_kvcr_config(**overrides),
             dp_bounds=(0, 1),
         )
 
