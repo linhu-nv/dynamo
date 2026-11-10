@@ -146,9 +146,9 @@ impl<const REQUEST_COST: bool, const SHARED_CREDIT: bool>
                 estimated_overlap
             };
             let shared_credit = if SHARED_CREDIT {
-                let shared = cache
-                    .shared_hits()
-                    .map_or(0, |hits| hits.hits_beyond(device.round().max(0.0) as u32));
+                let shared = cache.shared_hits().map_or(0.0, |hits| {
+                    hits.weighted_hits_beyond(candidate.worker(), device.round().max(0.0) as u32)
+                });
                 // Blocks a KV fetch would add beyond everything this worker holds.
                 let fetchable = if prepared.has_kv_transfer {
                     candidate
@@ -163,7 +163,7 @@ impl<const REQUEST_COST: bool, const SHARED_CREDIT: bool>
                 } else {
                     0.0
                 };
-                self.shared_cache_multiplier * (shared as f64 + fetchable)
+                self.shared_cache_multiplier * (shared + fetchable)
             } else {
                 // Preserve signed zero when the configured weight is -0.0.
                 self.shared_cache_multiplier
