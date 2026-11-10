@@ -38,7 +38,7 @@ use dynamo_runtime::{
 use crate::{
     kv_router::{
         KvEventSourceRequirement, KvRouter, SelectionPolicySource,
-        shared_cache::HicacheSharedKvCache,
+        radixshmem_cache::RadixShmemSharedKvCache, shared_cache::HicacheSharedKvCache,
     },
     local_model::runtime_config::{
         DisaggregatedEndpoint, ModelRuntimeConfig, VLLM_INFERENCE_V1_GENERATE_CAPABILITY,
@@ -189,6 +189,7 @@ pub struct ModelManager {
 
     /// Per-endpoint HiCache state and its one Mooncake event subscriber.
     hicache_caches: DashMap<EndpointId, HicacheSharedKvCache>,
+    radixshmem_caches: DashMap<EndpointId, RadixShmemSharedKvCache>,
 
     /// Shared KV-source membership coordinators, scoped by exact serving endpoint.
     /// Weak ownership lets the discovery loop stop when its last consumer goes away.
@@ -290,6 +291,7 @@ impl ModelManager {
             worker_inventory: Default::default(),
             runtime_configs: DashMap::new(),
             hicache_caches: DashMap::new(),
+            radixshmem_caches: DashMap::new(),
             kv_source_memberships: DashMap::new(),
             lora_domains: DashMap::new(),
             committed_lora_endpoints: parking_lot::Mutex::new(HashSet::new()),
@@ -2166,6 +2168,24 @@ impl ModelManager {
             .clone()
     }
 
+    fn radixshmem_cache_for(
+        &self,
+        endpoint: &Endpoint,
+        runtime_configs: RuntimeConfigWatch,
+    ) -> RadixShmemSharedKvCache {
+        self.radixshmem_caches
+            .entry(endpoint.id())
+            .or_insert_with(|| {
+                let cache = RadixShmemSharedKvCache::new(
+                    runtime_configs,
+                    endpoint.component().drt().child_token(),
+                );
+                cache.start_subscriber();
+                cache
+            })
+            .clone()
+    }
+
     pub fn remove_hicache_caches(&self, namespace: &str, component: &str) {
         let endpoint_ids = self
             .hicache_caches
@@ -2453,6 +2473,16 @@ impl ModelManager {
                     Some(Arc::new(
                         self.hicache_cache_for(&endpoint, workers_with_configs.clone()),
                     ))
+                }
+                dynamo_kv_router::SharedCacheType::Radixshmem => {
+                    tracing::info!(
+                        worker_component = &endpoint.id().component,
+                        "Using radixshmem shared KV cache"
+                    );
+                    Some(Arc::new(self.radixshmem_cache_for(
+                        &endpoint,
+                        workers_with_configs.clone(),
+                    )))
                 }
             }
         } else {

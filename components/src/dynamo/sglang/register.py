@@ -72,6 +72,7 @@ from dynamo.sglang.state_agent import inventory_sources
 from dynamo.sglang.video_routing import publish_sglang_qwen_video_processor_contract
 
 SGLANG_HICACHE_MOONCAKE_RUNTIME_KEY = "sglang_hicache_mooncake"
+SGLANG_FLEXKV_RADIXSHMEM_RUNTIME_KEY = "sglang_flexkv_radixshmem"
 SPEC_DECODE_RUNTIME_KEY = "spec_decode"
 SGLANG_SYSTEMONE_SERIAL_V1 = "sglang_systemone_serial_v1"
 TOOL_CALL_STRUCTURAL_TAG_REASONING_GATE_RUNTIME_KEY = (
@@ -558,6 +559,54 @@ def _get_mooncake_runtime_data(server_args: ServerArgs) -> Optional[dict[str, An
     }
 
 
+def _get_radixshmem_runtime_data(server_args: ServerArgs) -> Optional[dict[str, Any]]:
+    """Runtime data for a router with ``--shared-cache-type radixshmem``.
+
+    ``DYN_RADIXSHMEM_KV_EVENTS_ENDPOINT`` is this node's radix-server
+    ``--kv-events-endpoint`` as the frontend reaches it. An attention-DP instance
+    spanning nodes lists every node's endpoint in node-rank order in
+    ``DYN_RADIXSHMEM_KV_EVENTS_ENDPOINTS``.
+    """
+    endpoint = os.getenv("DYN_RADIXSHMEM_KV_EVENTS_ENDPOINT")
+    if not endpoint or not getattr(server_args, "enable_flexkv", False):
+        return None
+    hash_scheme = os.getenv("FLEXKV_HASH_SCHEME", "").strip()
+    if not hash_scheme:
+        logging.warning(
+            "DYN_RADIXSHMEM_KV_EVENTS_ENDPOINT is set but FLEXKV_HASH_SCHEME is not: "
+            "FlexKV hashes tokens itself and a router cannot match its placement"
+        )
+        return None
+    data = {
+        "page_size": int(getattr(server_args, "page_size", 1) or 1),
+        "hash_scheme": hash_scheme,
+        "kv_events_endpoint": endpoint,
+    }
+    node_endpoints = [
+        e.strip()
+        for e in os.getenv("DYN_RADIXSHMEM_KV_EVENTS_ENDPOINTS", "").split(",")
+        if e.strip()
+    ]
+    nnodes = int(getattr(server_args, "nnodes", 1) or 1)
+    dp_size, enable_dp_attention = sglang_dp_layout(server_args)
+    if nnodes > 1 and dp_size > 1 and enable_dp_attention:
+        if len(node_endpoints) != nnodes or dp_size % nnodes:
+            logging.warning(
+                "DYN_RADIXSHMEM_KV_EVENTS_ENDPOINTS should list one endpoint per node "
+                "(%d nodes, dp_size %d); the router will treat every DP rank as on %s",
+                nnodes,
+                dp_size,
+                endpoint,
+            )
+        else:
+            # SGLang places DP ranks on nodes in order, dp_size // nnodes per node.
+            ranks_per_node = dp_size // nnodes
+            data["dp_rank_endpoints"] = [
+                node_endpoints[rank // ranks_per_node] for rank in range(dp_size)
+            ]
+    return data
+
+
 def _eagle_enabled_for(speculative_algorithm: Optional[str]) -> bool:
     """Whether to publish ``ModelRuntimeConfig.enable_eagle`` for this speculative algorithm.
 
@@ -769,6 +818,22 @@ async def get_runtime_config(
         except Exception as e:
             logging.warning(
                 f"Failed to attach Mooncake HiCache runtime metadata to registration: {e}"
+            )
+
+    radixshmem_runtime_data = _get_radixshmem_runtime_data(server_args)
+    if radixshmem_runtime_data is not None:
+        try:
+            runtime_config.set_engine_specific(
+                SGLANG_FLEXKV_RADIXSHMEM_RUNTIME_KEY,
+                json.dumps(radixshmem_runtime_data),
+            )
+            logging.info(
+                "Published radixshmem placement endpoint for router use: %s",
+                radixshmem_runtime_data["kv_events_endpoint"],
+            )
+        except Exception as e:
+            logging.warning(
+                f"Failed to attach radixshmem runtime metadata to registration: {e}"
             )
 
     if engine is None:

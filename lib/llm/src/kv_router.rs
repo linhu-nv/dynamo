@@ -70,6 +70,7 @@ mod request_lease;
 mod routing_host;
 pub(crate) mod routing_load;
 pub mod sequence;
+pub mod radixshmem_cache;
 pub mod shared_cache;
 
 pub use dynamo_kv_router::scheduling::OverlapScoresResponse;

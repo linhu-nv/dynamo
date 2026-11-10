@@ -430,6 +430,8 @@ pub enum SharedCacheType {
     None,
     /// HiCache L3 shared cache — queries sglang workers via the request plane.
     Hicache,
+    /// FlexKV on radixshmem: per-node host pools, each publishing its placement.
+    Radixshmem,
 }
 
 /// Retention policy for a router-local primary approximate indexer.
@@ -474,6 +476,7 @@ impl fmt::Display for SharedCacheType {
         match self {
             Self::None => f.write_str("none"),
             Self::Hicache => f.write_str("hicache"),
+            Self::Radixshmem => f.write_str("radixshmem"),
         }
     }
 }
@@ -485,8 +488,9 @@ impl FromStr for SharedCacheType {
         match s {
             "none" => Ok(Self::None),
             "hicache" => Ok(Self::Hicache),
+            "radixshmem" => Ok(Self::Radixshmem),
             _ => Err(format!(
-                "unknown shared_cache_type: {s:?}, expected 'none' or 'hicache'"
+                "unknown shared_cache_type: {s:?}, expected 'none', 'hicache' or 'radixshmem'"
             )),
         }
     }
@@ -2002,7 +2006,7 @@ mod tests {
         assert!(error.contains("expected 'edf', 'fcfs', 'lcfs', or 'wspt'"));
 
         let error = try_config_from_values(&[("DYN_SHARED_CACHE_TYPE", "rdma")]).unwrap_err();
-        assert!(error.contains("expected 'none' or 'hicache'"));
+        assert!(error.contains("expected 'none', 'hicache' or 'radixshmem'"));
 
         let error =
             try_config_from_values(&[("DYN_ROUTER_PREFILL_LOAD_MODEL", "fast")]).unwrap_err();

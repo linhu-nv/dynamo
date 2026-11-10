@@ -781,10 +781,13 @@ class KvRouterArgGroup(ArgGroup):
                 "[EXPERIMENTAL] KV Router: Type of external shared KV cache to query. "
                 "'none' (default): disabled. "
                 "'hicache': query Mooncake master directly for SGLang L3 (HiCache) state "
-                "using SGLang-compatible Mooncake key derivation."
+                "using SGLang-compatible Mooncake key derivation. "
+                "'radixshmem': follow each node's radixshmem placement stream for SGLang "
+                "workers on FlexKV (their host pools are shared per node and pullable "
+                "across nodes); the default multiplier is then 0.75."
             ),
             arg_type=str,
-            choices=["none", "hicache"],
+            choices=["none", "hicache", "radixshmem"],
             env=self.env,
         )
         add_argument(

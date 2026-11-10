@@ -227,6 +227,7 @@ fn selection_weights(
             .unwrap_or(match kv_router_config.shared_cache_type {
                 crate::config::SharedCacheType::None => 0.0,
                 crate::config::SharedCacheType::Hicache => 0.5,
+                crate::config::SharedCacheType::Radixshmem => 0.75,
             }),
     }
 }
