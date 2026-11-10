@@ -473,7 +473,7 @@ fn selection_result(
         worker,
         required_blocks: request.request_blocks(block_size),
         effective_overlap_blocks: request.effective_overlap_blocks_for(worker),
-        cached_tokens: request.effective_cached_tokens_for(worker),
+        cached_tokens: request.load_cached_tokens_for(worker, block_size),
         max_raw_cached_tokens,
         selected_raw_cached_tokens: max_raw_cached_tokens
             .map(|_| request.raw_cached_tokens_for(worker, block_size)),
@@ -926,6 +926,28 @@ mod cache_reuse_tests {
     use super::test_support::base_request;
     use super::*;
     use crate::test_utils::SimpleWorkerConfig;
+
+    #[test]
+    #[allow(clippy::single_range_in_vec_init)]
+    fn shared_cache_hits_past_the_device_prefix_are_not_booked_as_prefill() {
+        let mut request = base_request(1024);
+        let worker = WorkerWithDpRank::from_worker_id(1);
+        request.overlap.effective_cached_tokens.insert(worker, 128);
+        request.overlap.tier_overlap_blocks.device.insert(worker, 2);
+        // block_size 64: device holds blocks 0..2, the shared cache 0..12.
+        assert_eq!(request.load_cached_tokens_for(worker, 64), 128);
+        request.shared_cache_hits =
+            Some(crate::protocols::SharedCacheHits::from_ranges(vec![0..12]));
+        assert_eq!(request.load_cached_tokens_for(worker, 64), 128 + 10 * 64);
+        let other = WorkerWithDpRank::from_worker_id(2);
+        assert_eq!(request.load_cached_tokens_for(other, 64), 12 * 64);
+        let result = selection_result(&request, worker, 64, None, None);
+        assert_eq!(result.cached_tokens, 128 + 10 * 64);
+        // Never more than the prompt.
+        request.shared_cache_hits =
+            Some(crate::protocols::SharedCacheHits::from_ranges(vec![0..100]));
+        assert_eq!(request.load_cached_tokens_for(other, 64), 1024);
+    }
 
     #[test]
     fn tracked_requests_report_raw_cache_reuse() {
