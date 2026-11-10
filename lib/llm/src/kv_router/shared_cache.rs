@@ -792,6 +792,15 @@ fn mooncake_config_from_runtime(
 }
 
 fn logical_page_hashes(tokens: &[u32], page_size: u32, is_eagle: bool) -> Vec<String> {
+    sglang_page_digests(tokens, page_size, is_eagle)
+        .iter()
+        .map(|digest| hex_encode(digest))
+        .collect()
+}
+
+/// SGLang's logical page hash chain (HiCache storage keys) as raw SHA-256
+/// digests: page `i` hashes page `i-1`'s digest followed by its tokens.
+pub(crate) fn sglang_page_digests(tokens: &[u32], page_size: u32, is_eagle: bool) -> Vec<[u8; 32]> {
     let page_size = page_size as usize;
     if page_size == 0 {
         return Vec::new();
@@ -813,16 +822,13 @@ fn logical_page_hashes(tokens: &[u32], page_size: u32, is_eagle: bool) -> Vec<St
     let aligned_len = (query_tokens.len() / page_size) * page_size;
     let aligned_tokens = &query_tokens[..aligned_len];
 
-    let mut page_hashes = Vec::with_capacity(aligned_tokens.len() / page_size);
-    let mut prior_hash = None;
-
+    let mut digests: Vec<[u8; 32]> = Vec::with_capacity(aligned_tokens.len() / page_size);
     for page_tokens in aligned_tokens.chunks(page_size) {
-        let digest = hash_query_tokens(page_tokens, prior_hash.as_ref());
-        page_hashes.push(hex_encode(&digest));
-        prior_hash = Some(digest);
+        let digest = hash_query_tokens(page_tokens, digests.last());
+        digests.push(digest);
     }
 
-    page_hashes
+    digests
 }
 
 fn hash_query_tokens(page_tokens: &[QueryToken], prior_hash: Option<&[u8; 32]>) -> [u8; 32] {

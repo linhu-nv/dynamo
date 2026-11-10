@@ -19,6 +19,8 @@ pub enum SharedCacheType {
     None,
     /// HiCache L3 shared cache — queries sglang workers via the request plane.
     Hicache,
+    /// FlexKV on radixshmem: per-node host pools, each publishing its placement.
+    Radixshmem,
 }
 
 impl fmt::Display for SharedCacheType {
@@ -26,6 +28,7 @@ impl fmt::Display for SharedCacheType {
         match self {
             Self::None => f.write_str("none"),
             Self::Hicache => f.write_str("hicache"),
+            Self::Radixshmem => f.write_str("radixshmem"),
         }
     }
 }
@@ -37,8 +40,9 @@ impl FromStr for SharedCacheType {
         match s {
             "none" => Ok(Self::None),
             "hicache" => Ok(Self::Hicache),
+            "radixshmem" => Ok(Self::Radixshmem),
             _ => Err(format!(
-                "unknown shared_cache_type: {s:?}, expected 'none' or 'hicache'"
+                "unknown shared_cache_type: {s:?}, expected 'none', 'hicache' or 'radixshmem'"
             )),
         }
     }

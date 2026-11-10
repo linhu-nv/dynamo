@@ -76,6 +76,7 @@ pub(crate) use routing_host::hosted_picker;
 pub(crate) use routing_host::hosted_request;
 pub(crate) mod routing_load;
 pub mod sequence;
+pub mod radixshmem_cache;
 pub mod shared_cache;
 
 pub use active_load::ActiveLoad;

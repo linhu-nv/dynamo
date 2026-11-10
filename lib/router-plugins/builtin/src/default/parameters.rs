@@ -103,6 +103,7 @@ impl Parameters {
                     match config.shared_cache_type {
                         SharedCacheType::None => 0.0,
                         SharedCacheType::Hicache => 0.5,
+                        SharedCacheType::Radixshmem => 0.75,
                     },
                 ))
             }),

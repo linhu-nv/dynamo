@@ -1754,7 +1754,7 @@ mod tests {
         assert!(error.contains("expected 'edf', 'fcfs', 'lcfs', or 'wspt'"));
 
         let error = try_config_from_values(&[("DYN_SHARED_CACHE_TYPE", "rdma")]).unwrap_err();
-        assert!(error.contains("expected 'none' or 'hicache'"));
+        assert!(error.contains("expected 'none', 'hicache' or 'radixshmem'"));
 
         let error =
             try_config_from_values(&[("DYN_ROUTER_PREFILL_LOAD_MODEL", "fast")]).unwrap_err();
