@@ -515,6 +515,32 @@ impl SchedulingRequest {
             .unwrap_or(0)
     }
 
+    /// Prompt tokens `worker` will not have to compute, for prefill-load
+    /// accounting: its effective cached tokens plus the shared-cache blocks past
+    /// its device prefix. A shared hit is loaded rather than recomputed, so it
+    /// counts in full here; the scoring multiplier only expresses preference.
+    pub(crate) fn load_cached_tokens_for(
+        &self,
+        worker: WorkerWithDpRank,
+        block_size: u32,
+    ) -> usize {
+        let effective = self.effective_cached_tokens_for(worker);
+        let Some(hits) = &self.shared_cache_hits else {
+            return effective;
+        };
+        let device_blocks = self
+            .overlap
+            .tier_overlap_blocks
+            .device
+            .get(&worker)
+            .copied()
+            .unwrap_or(0);
+        let shared_tokens = (hits.hits_beyond(u32::try_from(device_blocks).unwrap_or(u32::MAX))
+            as usize)
+            .saturating_mul(block_size as usize);
+        effective.saturating_add(shared_tokens).min(self.isl_tokens)
+    }
+
     pub(crate) fn raw_cached_tokens_for(&self, worker: WorkerWithDpRank, block_size: u32) -> usize {
         let tiers = &self.overlap.tier_overlap_blocks;
         let blocks = tiers

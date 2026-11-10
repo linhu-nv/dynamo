@@ -1815,13 +1815,15 @@ async fn uncached_selection_stays_uncached_after_queue_refresh_deadline() {
     let core = Arc::new(core_with(config, host, None, WorkerType::Aggregated, None));
     core.upsert_worker(worker(1)).await.unwrap();
     let mut held = reserve_request("held");
-    held.prompt.token_ids = Some((1..=8).collect());
+    // The shared cache hits only the full block, so the held request still
+    // books the 3-token tail as prefill load and saturates the worker.
+    held.prompt.token_ids = Some((1..=7).collect());
     assert_eq!(
         core.select_and_reserve(held)
             .await
             .unwrap()
             .effective_prefill_tokens,
-        8
+        3
     );
     let input = prompt();
     let block_hashes = input.view().block_hashes_for_indexer(4, false).unwrap();
