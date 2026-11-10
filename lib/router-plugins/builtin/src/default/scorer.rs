@@ -138,10 +138,10 @@ impl<const REQUEST_COST: bool, const SHARED_CREDIT: bool>
                 estimated_overlap
             };
             let shared_credit = if SHARED_CREDIT {
-                let shared = cache
-                    .shared_hits()
-                    .map_or(0, |hits| hits.hits_beyond(device.round().max(0.0) as u32));
-                self.shared_cache_multiplier * (shared as f64 + copyable)
+                let shared = cache.shared_hits().map_or(0.0, |hits| {
+                    hits.weighted_hits_beyond(candidate.worker(), device.round().max(0.0) as u32)
+                });
+                self.shared_cache_multiplier * (shared + copyable)
             } else {
                 // Preserve signed zero when the configured weight is -0.0.
                 self.shared_cache_multiplier

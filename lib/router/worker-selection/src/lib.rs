@@ -68,7 +68,7 @@ pub use selection_config::{
     overlap_score_credit_error_message, validate_finite_non_negative,
     validate_overlap_score_credit, validate_range,
 };
-pub use shared_cache::SharedCacheHits;
+pub use shared_cache::{SharedCacheHits, SharedCacheLocality, SharedCacheWorkerHosts};
 pub use trace::{SelectionTrace, SelectionTraceRow, SelectionTraceSpec};
 
 pub use dynamo_router_protocol::session::SessionContext;

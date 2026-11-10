@@ -64,4 +64,6 @@ pub use dynamo_session_affinity::{
     MAX_SESSION_AFFINITY_ENTRIES, MAX_SESSION_AFFINITY_ID_BYTES, WorkerAffinityTarget,
 };
 pub use dynamo_slot_tracker::WorkerLoadProjection;
-pub use dynamo_worker_selection::{SelectionTraceSpec, SharedCacheHits};
+pub use dynamo_worker_selection::{
+    SelectionTraceSpec, SharedCacheHits, SharedCacheLocality, SharedCacheWorkerHosts,
+};

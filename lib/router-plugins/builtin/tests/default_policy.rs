@@ -982,3 +982,42 @@ fn startup_policy_parameters_match_the_default_factory_for_every_role() {
         }
     }
 }
+
+#[test]
+fn shared_cache_hits_off_the_workers_host_earn_less_credit() {
+    let (workers, mut request) = fixture(2, 128);
+    request.overlap = Default::default();
+    for (worker, load) in &mut request.worker_loads {
+        *load = Default::default();
+        load.active_decode_blocks = if worker.worker_id == 1 { 1 } else { 0 };
+    }
+    // All 8 blocks are in the pool, but worker 0's host holds only the first 2.
+    #[allow(clippy::single_range_in_vec_init)]
+    let hits = SharedCacheHits::from_ranges(vec![0..8]);
+    let config = KvRouterConfig {
+        shared_cache_multiplier: Some(0.5),
+        router_temperature: 0.0,
+        ..Default::default()
+    };
+    let policy = default_policy(SelectionConfig::from(&config), "prefill");
+    let mut select = |hits: SharedCacheHits| {
+        request.shared_cache_hits = Some(hits);
+        policy
+            .select_worker(selection_input(&workers, &request, 16))
+            .unwrap()
+            .worker
+            .worker_id
+    };
+    // Location-blind: same credit for both, the less loaded worker wins.
+    assert_eq!(select(hits.clone()), 0);
+    let locality = SharedCacheLocality {
+        host_prefix_blocks: vec![2, 8],
+        worker_hosts: Arc::new(SharedCacheWorkerHosts::from_iter([
+            (0, vec![0]),
+            (1, vec![1]),
+        ])),
+        remote_weight: 0.5,
+    };
+    // Worker 1 loads all 8 from its own host; worker 0 must pull 6 of them.
+    assert_eq!(select(hits.with_locality(locality)), 1);
+}

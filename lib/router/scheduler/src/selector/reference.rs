@@ -216,12 +216,12 @@ impl<C: Borrow<SelectionConfig>> DefaultWorkerScorer<C> {
         let load = &row.load;
         let effective_overlap_blocks = cache.effective_overlap_blocks;
         let device_overlap_blocks = cache.device_overlap_blocks;
-        let shared_beyond_device_blocks = context.shared_cache_hits().map_or(0, |hits| {
-            hits.hits_beyond(device_overlap_blocks.round().max(0.0) as u32)
+        let shared_beyond_device_blocks = context.shared_cache_hits().map_or(0.0, |hits| {
+            hits.weighted_hits_beyond(worker, device_overlap_blocks.round().max(0.0) as u32)
         });
         // The default credits no KV copy; only `kvcr` does.
         let remote_blocks = shared_beyond_device_blocks;
-        let shared_overlap_blocks = weights.shared_cache_multiplier * remote_blocks as f64;
+        let shared_overlap_blocks = weights.shared_cache_multiplier * remote_blocks;
         // Normalize backlog above the least-loaded eligible worker by this request's
         // size. The rational decay softly trades cache locality for prefill balance,
         // while leaving workers at the load floor with their full device credit.
@@ -302,12 +302,12 @@ impl<C: Borrow<SelectionConfig>> DefaultWorkerScorer<C> {
         // `request_id` is the same value `[ROUTING] Best` logs, and `worker_type` separates the
         // prefill-pool and decode-pool decisions that interleave into one log. Both are evaluated
         // inside the macro so they cost nothing when DEBUG is disabled.
-        if remote_blocks > 0 {
+        if remote_blocks > 0.0 {
             tracing::debug!(
                 request_id = context.request_id().unwrap_or("-"),
                 worker_type = self.worker_type,
                 "{formula_name} for worker_id={} dp_rank={:?} with {effective_overlap_blocks:.2} effective cached blocks, \
-                 {} shared blocks beyond the local prefix (multiplier={shared_cache_multiplier:.2}): {logit:.3} \
+                 {:.2} shared blocks beyond the local prefix (multiplier={shared_cache_multiplier:.2}): {logit:.3} \
                  = prefill_load_scale * adjusted_prefill_blocks + decode_blocks + active_request_cost_blocks \
                  = {prefill_load_scale:.3} * {adjusted_prefill_blocks:.3} + {decode_cost_blocks:.3} + {active_request_cost_blocks:.3} \
                  (raw_prefill_blocks: {:.3}, overlap_credit_blocks: {overlap_credit_blocks:.3}, \
