@@ -10,6 +10,7 @@
 //! the scorer can prefer workers whose node already holds the prefix.
 
 use std::collections::{HashMap, HashSet};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
@@ -103,6 +104,9 @@ pub struct RadixShmemSharedKvCache {
     subscriptions: Arc<Mutex<Subscriptions>>,
     /// Node bit of each worker's DP ranks; rebuilt when workers or nodes change.
     worker_hosts: Arc<Mutex<Arc<SharedCacheWorkerHosts>>>,
+    /// Page size and hash scheme shared by all workers; `None` when they disagree.
+    layout: Arc<Mutex<Option<(u32, String)>>>,
+    page_size_warned: Arc<AtomicBool>,
     cancellation_token: CancellationToken,
     max_entries: usize,
     remote_weight: f64,
@@ -124,6 +128,8 @@ impl RadixShmemSharedKvCache {
             holders: Arc::new(DashMap::new()),
             subscriptions: Arc::new(Mutex::new(Subscriptions::default())),
             worker_hosts: Arc::new(Mutex::new(Arc::new(SharedCacheWorkerHosts::default()))),
+            layout: Arc::new(Mutex::new(None)),
+            page_size_warned: Arc::new(AtomicBool::new(false)),
             cancellation_token,
             max_entries,
             remote_weight,
@@ -136,11 +142,6 @@ impl RadixShmemSharedKvCache {
         tokio::spawn(async move { cache.run_supervisor().await });
     }
 
-    pub fn shutdown(&self) {
-        self.cancellation_token.cancel();
-        self.holders.clear();
-    }
-
     fn configs(&self) -> Vec<(WorkerId, RadixShmemRuntimeConfig)> {
         let workers = self.runtime_configs.borrow();
         workers
@@ -149,22 +150,6 @@ impl RadixShmemSharedKvCache {
                 config_from_runtime(*worker_id, runtime_config).map(|c| (*worker_id, c))
             })
             .collect()
-    }
-
-    /// The layout every worker must share for one lookup to be valid for all.
-    fn layout(&self) -> Option<(u32, String)> {
-        let configs = self.configs();
-        let (_, first) = configs.first()?;
-        if configs
-            .iter()
-            .any(|(_, c)| c.page_size != first.page_size || c.hash_scheme != first.hash_scheme)
-        {
-            tracing::warn!(
-                "radixshmem runtime configs differ across workers; skipping shared-cache lookup"
-            );
-            return None;
-        }
-        Some((first.page_size, first.hash_scheme.clone()))
     }
 
     async fn run_supervisor(self) {
@@ -231,6 +216,8 @@ impl RadixShmemSharedKvCache {
             subs.by_endpoint
                 .insert(endpoint, Subscription { bit, cancel });
         }
+        let layout = shared_layout(&configs);
+        *self.layout.lock().unwrap() = layout;
         let hosts = worker_hosts(&configs, &subs.by_endpoint);
         let mut current = self.worker_hosts.lock().unwrap();
         if **current != hosts {
@@ -393,6 +380,21 @@ impl RadixShmemSharedKvCache {
     }
 }
 
+/// The layout every worker must share for one lookup to be valid for all.
+fn shared_layout(configs: &[(WorkerId, RadixShmemRuntimeConfig)]) -> Option<(u32, String)> {
+    let (_, first) = configs.first()?;
+    if configs
+        .iter()
+        .any(|(_, c)| c.page_size != first.page_size || c.hash_scheme != first.hash_scheme)
+    {
+        tracing::warn!(
+            "radixshmem runtime configs differ across workers; skipping shared-cache lookups"
+        );
+        return None;
+    }
+    Some((first.page_size, first.hash_scheme.clone()))
+}
+
 /// Node bit of each worker's DP ranks. A worker with a node we do not follow
 /// (over `MAX_NODES`) is left out, so its hits count as local.
 fn worker_hosts(
@@ -462,7 +464,7 @@ impl SharedKvCache for RadixShmemSharedKvCache {
         if cache_namespace.filter(|ns| !ns.is_empty()).is_some() {
             return Ok(SharedCacheHits::default());
         }
-        let Some((page_size, scheme)) = self.layout() else {
+        let Some((page_size, scheme)) = self.layout.lock().unwrap().clone() else {
             return Ok(SharedCacheHits::default());
         };
         if scheme != SGLANG_SHA256_I64_SCHEME {
@@ -470,11 +472,13 @@ impl SharedKvCache for RadixShmemSharedKvCache {
             return Ok(SharedCacheHits::default());
         }
         if page_size == 0 || page_size != block_size {
-            tracing::warn!(
-                worker_page_size = page_size,
-                router_page_size = block_size,
-                "radixshmem page size mismatch; skipping shared-cache lookup"
-            );
+            if !self.page_size_warned.swap(true, Ordering::Relaxed) {
+                tracing::warn!(
+                    worker_page_size = page_size,
+                    router_page_size = block_size,
+                    "radixshmem page size mismatch; skipping shared-cache lookups"
+                );
+            }
             return Ok(SharedCacheHits::default());
         }
         let (run, node_runs) = self.held_prefix_pages(tokens, page_size);
