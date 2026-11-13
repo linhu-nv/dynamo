@@ -12,7 +12,11 @@ import pytest
 
 from dynamo.common.token_budget import TOKEN_BUDGET_RUNTIME_KEY
 from dynamo.llm import ModelInput, ModelType, WorkerType
-from dynamo.vllm.capacity import get_metrics_model_name, get_spec_decode_runtime_data
+from dynamo.vllm.capacity import (
+    get_metrics_model_name,
+    get_radixshmem_runtime_data,
+    get_spec_decode_runtime_data,
+)
 from dynamo.vllm.engine_generate import (
     VLLM_ENABLE_TOWER_CONNECTOR_LORA_RUNTIME_KEY,
     VLLM_GENERATE_CAPABILITY,
@@ -203,3 +207,87 @@ def test_spec_decode_runtime_data_ignores_invalid_nextn(speculative_config):
     vllm_config = SimpleNamespace(speculative_config=None)
 
     assert get_spec_decode_runtime_data(config, vllm_config) is None
+
+
+# vLLM's NONE_HASH for sha256_cbor with the default seed (PYTHONHASHSEED unset).
+VLLM_NONE_HASH = "9bd96a485ad84efdafb72ee48a1d7a69bcead0f8f0433173941b276b9581eef0"
+
+
+def _flexkv_vllm_config(kv_transfer_config, dp_size_local=1, algo="sha256_cbor"):
+    return SimpleNamespace(
+        kv_transfer_config=kv_transfer_config,
+        cache_config=SimpleNamespace(block_size=64, prefix_caching_hash_algo=algo),
+        parallel_config=SimpleNamespace(data_parallel_size_local=dp_size_local),
+    )
+
+
+@pytest.mark.parametrize(
+    "kv_transfer_config",
+    [
+        SimpleNamespace(kv_connector="FlexKVConnectorV1"),
+        SimpleNamespace(
+            kv_connector="PdConnector",
+            kv_connector_extra_config={
+                "connectors": [
+                    {"kv_connector": "FlexKVConnectorV1"},
+                    {"kv_connector": "NixlConnector"},
+                ]
+            },
+        ),
+    ],
+)
+def test_radixshmem_runtime_data_for_flexkv_workers(monkeypatch, kv_transfer_config):
+    monkeypatch.setenv("DYN_RADIXSHMEM_KV_EVENTS_ENDPOINT", "tcp://10.0.0.1:5891")
+    monkeypatch.setenv("FLEXKV_HASH_SCHEME", "vllm-sha256-cbor-i64-v1")
+    monkeypatch.delenv("PYTHONHASHSEED", raising=False)
+    vllm_config = _flexkv_vllm_config(kv_transfer_config, dp_size_local=2)
+
+    assert get_radixshmem_runtime_data(vllm_config, (0, 2)) == {
+        "page_size": 64,
+        "hash_scheme": "vllm-sha256-cbor-i64-v1",
+        "none_hash": VLLM_NONE_HASH,
+        "kv_events_endpoint": "tcp://10.0.0.1:5891",
+    }
+
+
+def test_radixshmem_runtime_data_needs_endpoint_scheme_and_flexkv(monkeypatch):
+    flexkv = _flexkv_vllm_config(SimpleNamespace(kv_connector="FlexKVConnectorV1"))
+    nixl = _flexkv_vllm_config(SimpleNamespace(kv_connector="NixlConnector"))
+    monkeypatch.delenv("DYN_RADIXSHMEM_KV_EVENTS_ENDPOINT", raising=False)
+    monkeypatch.setenv("FLEXKV_HASH_SCHEME", "vllm-sha256-cbor-i64-v1")
+    assert get_radixshmem_runtime_data(flexkv, (0, 1)) is None
+
+    monkeypatch.setenv("DYN_RADIXSHMEM_KV_EVENTS_ENDPOINT", "tcp://10.0.0.1:5891")
+    assert get_radixshmem_runtime_data(nixl, (0, 1)) is None
+    assert get_radixshmem_runtime_data(_flexkv_vllm_config(None), (0, 1)) is None
+
+    # pickle-based sha256 cannot be recomputed outside Python
+    sha256 = _flexkv_vllm_config(
+        SimpleNamespace(kv_connector="FlexKVConnectorV1"), algo="sha256"
+    )
+    assert get_radixshmem_runtime_data(sha256, (0, 1)) is None
+
+    monkeypatch.delenv("FLEXKV_HASH_SCHEME")
+    assert get_radixshmem_runtime_data(flexkv, (0, 1)) is None
+
+
+def test_radixshmem_runtime_data_maps_dp_ranks_to_their_nodes(monkeypatch):
+    monkeypatch.setenv("DYN_RADIXSHMEM_KV_EVENTS_ENDPOINT", "tcp://a:5891")
+    monkeypatch.setenv("FLEXKV_HASH_SCHEME", "vllm-sha256-cbor-i64-v1")
+    monkeypatch.setenv(
+        "DYN_RADIXSHMEM_KV_EVENTS_ENDPOINTS", "tcp://a:5891, tcp://b:5891"
+    )
+    vllm_config = _flexkv_vllm_config(
+        SimpleNamespace(kv_connector="FlexKVConnectorV1"), dp_size_local=2
+    )
+
+    data = get_radixshmem_runtime_data(vllm_config, (0, 4))
+    assert data["dp_rank_endpoints"] == [
+        "tcp://a:5891",
+        "tcp://a:5891",
+        "tcp://b:5891",
+        "tcp://b:5891",
+    ]
+
+    monkeypatch.setenv("DYN_RADIXSHMEM_KV_EVENTS_ENDPOINTS", "tcp://a:5891")
+    assert "dp_rank_endpoints" not in get_radixshmem_runtime_data(vllm_config, (0, 4))

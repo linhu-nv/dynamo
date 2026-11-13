@@ -1,7 +1,7 @@
 // SPDX-FileCopyrightText: Copyright (c) 2024-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
-//! Shared KV cache for SGLang workers on FlexKV + radixshmem.
+//! Shared KV cache for SGLang and vLLM workers on FlexKV + radixshmem.
 //!
 //! Each node runs one radix-server whose host pool is shared by every worker on
 //! the node. The server publishes the blocks it stores and drops; this client
@@ -18,6 +18,7 @@ use async_trait::async_trait;
 use dashmap::DashMap;
 use futures::StreamExt;
 use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
 use tokio_util::sync::CancellationToken;
 
 use crate::{
@@ -33,9 +34,13 @@ use dynamo_worker_selection::{SharedCacheHits, SharedCacheLocality, SharedCacheW
 
 /// Runtime-data key of a worker's `RadixShmemRuntimeConfig`.
 pub const RADIXSHMEM_RUNTIME_KEY: &str = "radixshmem";
-/// The only scheme this client can recompute: SGLang's SHA-256 page chain,
-/// first 8 bytes as a big-endian signed integer (SGLang's `hash_str_to_int64`).
+/// The schemes this client can recompute from request tokens. Each keys a page
+/// by its digest's first 8 bytes as a big-endian signed integer.
+/// SGLang's SHA-256 page chain (SGLang's `hash_str_to_int64`).
 pub const SGLANG_SHA256_I64_SCHEME: &str = "sglang-sha256-i64-v1";
+/// vLLM's own block hashes with `--prefix-caching-hash-algo sha256_cbor`, for
+/// blocks without extra keys (no LoRA, cache salt, multimodal or prompt embeds).
+pub const VLLM_SHA256_CBOR_I64_SCHEME: &str = "vllm-sha256-cbor-i64-v1";
 const RECONNECT_DELAY: Duration = Duration::from_secs(1);
 /// Nodes heartbeat every second. A SUB socket never reports a vanished publisher,
 /// so a silent node's view is dropped after this long.
@@ -56,6 +61,10 @@ pub struct RadixShmemRuntimeConfig {
     /// several nodes. Empty: every rank is on `kv_events_endpoint`'s node.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub dp_rank_endpoints: Vec<String>,
+    /// vLLM's `NONE_HASH` (hex), the parent of a request's first block, for
+    /// `VLLM_SHA256_CBOR_I64_SCHEME`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub none_hash: Option<String>,
 }
 
 impl RadixShmemRuntimeConfig {
@@ -66,6 +75,102 @@ impl RadixShmemRuntimeConfig {
             &self.dp_rank_endpoints
         }
     }
+}
+
+/// How every worker keys its pages; one lookup serves them all.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct Layout {
+    page_size: u32,
+    scheme: KeyScheme,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum KeyScheme {
+    Sglang,
+    Vllm { none_hash: [u8; 32] },
+}
+
+impl Layout {
+    fn from_config(config: &RadixShmemRuntimeConfig) -> Option<Self> {
+        let scheme = match config.hash_scheme.as_str() {
+            SGLANG_SHA256_I64_SCHEME => KeyScheme::Sglang,
+            VLLM_SHA256_CBOR_I64_SCHEME => KeyScheme::Vllm {
+                none_hash: parse_digest(config.none_hash.as_deref()?)?,
+            },
+            _ => return None,
+        };
+        Some(Self {
+            page_size: config.page_size,
+            scheme,
+        })
+    }
+
+    /// The keys a request's full pages are stored under.
+    fn page_keys(&self, tokens: &[u32]) -> Vec<i64> {
+        let digests = match &self.scheme {
+            KeyScheme::Sglang => sglang_page_digests(tokens, self.page_size, false),
+            KeyScheme::Vllm { none_hash } => vllm_block_digests(tokens, self.page_size, none_hash),
+        };
+        digests.iter().map(page_key).collect()
+    }
+}
+
+/// vLLM's block hashes under `--prefix-caching-hash-algo sha256_cbor` for blocks
+/// without extra keys: block `i` is the SHA-256 of the canonical CBOR of
+/// `[block i-1's hash (NONE_HASH for the first), [its token ids], null]`.
+fn vllm_block_digests(tokens: &[u32], block_size: u32, none_hash: &[u8; 32]) -> Vec<[u8; 32]> {
+    let block_size = block_size as usize;
+    if block_size == 0 {
+        return Vec::new();
+    }
+    let mut digests: Vec<[u8; 32]> = Vec::with_capacity(tokens.len() / block_size);
+    let mut cbor = Vec::with_capacity(40 + 5 * block_size);
+    for block in tokens.chunks_exact(block_size) {
+        let parent = *digests.last().unwrap_or(none_hash);
+        cbor.clear();
+        cbor.push(0x83); // array(3)
+        cbor_head(&mut cbor, 2, 32); // byte string: the parent hash
+        cbor.extend_from_slice(&parent);
+        cbor_head(&mut cbor, 4, block.len() as u64); // array: the tokens
+        for &token in block {
+            cbor_head(&mut cbor, 0, token as u64);
+        }
+        cbor.push(0xf6); // null: no extra keys
+        digests.push(Sha256::digest(&cbor).into());
+    }
+    digests
+}
+
+/// A canonical CBOR head: the major type and the argument in its shortest form.
+fn cbor_head(out: &mut Vec<u8>, major: u8, value: u64) {
+    let major = major << 5;
+    match value {
+        0..=23 => out.push(major | value as u8),
+        24..=0xff => out.extend_from_slice(&[major | 24, value as u8]),
+        0x100..=0xffff => {
+            out.push(major | 25);
+            out.extend_from_slice(&(value as u16).to_be_bytes());
+        }
+        0x1_0000..=0xffff_ffff => {
+            out.push(major | 26);
+            out.extend_from_slice(&(value as u32).to_be_bytes());
+        }
+        _ => {
+            out.push(major | 27);
+            out.extend_from_slice(&value.to_be_bytes());
+        }
+    }
+}
+
+fn parse_digest(hex: &str) -> Option<[u8; 32]> {
+    if hex.len() != 64 || !hex.is_ascii() {
+        return None;
+    }
+    let mut digest = [0u8; 32];
+    for (i, byte) in digest.iter_mut().enumerate() {
+        *byte = u8::from_str_radix(&hex[2 * i..2 * i + 2], 16).ok()?;
+    }
+    Some(digest)
 }
 
 /// One placement batch from a node's radix-server (radixshmem.kv_events).
@@ -105,8 +210,9 @@ pub struct RadixShmemSharedKvCache {
     subscriptions: Arc<Mutex<Subscriptions>>,
     /// Node bit of each worker's DP ranks; rebuilt when workers or nodes change.
     worker_hosts: Arc<Mutex<Arc<SharedCacheWorkerHosts>>>,
-    /// Page size and hash scheme shared by all workers; `None` when they disagree.
-    layout: Arc<Mutex<Option<(u32, String)>>>,
+    /// Page layout shared by all workers; `None` when they disagree or it is
+    /// not recomputable here.
+    layout: Arc<Mutex<Option<Layout>>>,
     page_size_warned: Arc<AtomicBool>,
     cancellation_token: CancellationToken,
     max_entries: usize,
@@ -359,14 +465,14 @@ impl RadixShmemSharedKvCache {
     }
 
     /// Leading pages held by some node, and by each node itself (indexed by
-    /// node bit), for a request's tokens.
-    fn held_prefix_pages(&self, tokens: &[u32], page_size: u32) -> (u32, Vec<u32>) {
+    /// node bit), for a request's page keys.
+    fn held_prefix_pages(&self, keys: &[i64]) -> (u32, Vec<u32>) {
         let mut run = 0u32;
         let mut node_runs = vec![0u32; MAX_NODES];
         // Nodes whose own run has not ended yet.
         let mut extending = u64::MAX;
-        for digest in sglang_page_digests(tokens, page_size, false) {
-            let Some(held) = self.holders.get(&page_key(&digest)).map(|h| *h) else {
+        for key in keys {
+            let Some(held) = self.holders.get(key).map(|h| *h) else {
                 break;
             };
             run += 1;
@@ -382,18 +488,25 @@ impl RadixShmemSharedKvCache {
 }
 
 /// The layout every worker must share for one lookup to be valid for all.
-fn shared_layout(configs: &[(WorkerId, RadixShmemRuntimeConfig)]) -> Option<(u32, String)> {
+fn shared_layout(configs: &[(WorkerId, RadixShmemRuntimeConfig)]) -> Option<Layout> {
     let (_, first) = configs.first()?;
+    let Some(layout) = Layout::from_config(first) else {
+        tracing::warn!(
+            scheme = %first.hash_scheme,
+            "radixshmem hash scheme not recomputable here; skipping shared-cache lookups"
+        );
+        return None;
+    };
     if configs
         .iter()
-        .any(|(_, c)| c.page_size != first.page_size || c.hash_scheme != first.hash_scheme)
+        .any(|(_, c)| Layout::from_config(c).as_ref() != Some(&layout))
     {
         tracing::warn!(
             "radixshmem runtime configs differ across workers; skipping shared-cache lookups"
         );
         return None;
     }
-    Some((first.page_size, first.hash_scheme.clone()))
+    Some(layout)
 }
 
 /// Node bit of each worker's DP ranks. A worker with a node we do not follow
@@ -459,17 +572,14 @@ impl SharedKvCache for RadixShmemSharedKvCache {
         block_size: u32,
         cache_namespace: Option<&str>,
     ) -> Result<SharedCacheHits, KvRouterError> {
-        // The namespace seeds SGLang's hash chain and is not visible here.
+        // A namespace enters the engine's hashes, which are recomputed here without it.
         if cache_namespace.filter(|ns| !ns.is_empty()).is_some() {
             return Ok(SharedCacheHits::default());
         }
-        let Some((page_size, scheme)) = self.layout.lock().unwrap().clone() else {
+        let Some(layout) = self.layout.lock().unwrap().clone() else {
             return Ok(SharedCacheHits::default());
         };
-        if scheme != SGLANG_SHA256_I64_SCHEME {
-            tracing::debug!(%scheme, "radixshmem hash scheme not recomputable here; skipping shared-cache lookup");
-            return Ok(SharedCacheHits::default());
-        }
+        let page_size = layout.page_size;
         if page_size == 0 || page_size != block_size {
             if !self.page_size_warned.swap(true, Ordering::Relaxed) {
                 tracing::warn!(
@@ -480,7 +590,7 @@ impl SharedKvCache for RadixShmemSharedKvCache {
             }
             return Ok(SharedCacheHits::default());
         }
-        let (run, node_runs) = self.held_prefix_pages(tokens, page_size);
+        let (run, node_runs) = self.held_prefix_pages(&layout.page_keys(tokens));
         tracing::debug!(
             pages = tokens.len() as u32 / page_size,
             held = run,
@@ -592,11 +702,15 @@ mod tests {
             0,
             batch("a", vec![("stored", vec![keys[0], keys[2]])]),
         );
-        assert_eq!(c.held_prefix_pages(&tokens, 4).0, 1);
+        assert_eq!(c.held_prefix_pages(&keys).0, 1);
         c.apply(0, &mut a, 1, batch("a", vec![("stored", vec![keys[1]])]));
-        assert_eq!(c.held_prefix_pages(&tokens, 4).0, 3);
+        assert_eq!(c.held_prefix_pages(&keys).0, 3);
         // the trailing partial page never counts
-        assert_eq!(c.held_prefix_pages(&tokens[..11], 4).0, 2);
+        let sglang = Layout {
+            page_size: 4,
+            scheme: KeyScheme::Sglang,
+        };
+        assert_eq!(c.held_prefix_pages(&sglang.page_keys(&tokens[..11])).0, 2);
     }
 
     #[test]
@@ -624,7 +738,7 @@ mod tests {
                 keys[..3].iter().map(|k| ("stored", vec![*k])).collect(),
             ),
         );
-        let (run, node_runs) = c.held_prefix_pages(&tokens, 4);
+        let (run, node_runs) = c.held_prefix_pages(&keys);
         assert_eq!(run, 3);
         assert_eq!(&node_runs[..3], &[1, 3, 0]);
     }
@@ -636,6 +750,7 @@ mod tests {
             hash_scheme: SGLANG_SHA256_I64_SCHEME.into(),
             kv_events_endpoint: endpoint.into(),
             dp_rank_endpoints: ranks.iter().map(|e| e.to_string()).collect(),
+            none_hash: None,
         };
         let sub = |bit| Subscription {
             bit,
@@ -678,6 +793,52 @@ mod tests {
         let config = config_from_runtime(1, &runtime).unwrap();
         assert_eq!(config.page_size, 64);
         assert_eq!(config.kv_events_endpoint, "tcp://a");
+    }
+
+    #[test]
+    fn vllm_keys_match_vllm() {
+        // vllm.v1.core.kv_cache_utils with sha256_cbor and the default seed:
+        // NONE_HASH, then hash_block_tokens over blocks of 4 with no extra keys.
+        let none_hash = "9bd96a485ad84efdafb72ee48a1d7a69bcead0f8f0433173941b276b9581eef0";
+        let tokens = [
+            0,
+            23,
+            24,
+            255,
+            256,
+            65535,
+            65536,
+            151643,
+            7,
+            1000,
+            u32::MAX,
+            42,
+        ];
+        let config = RadixShmemRuntimeConfig {
+            page_size: 4,
+            hash_scheme: VLLM_SHA256_CBOR_I64_SCHEME.into(),
+            kv_events_endpoint: "tcp://a".into(),
+            dp_rank_endpoints: vec![],
+            none_hash: Some(none_hash.into()),
+        };
+        let layout = Layout::from_config(&config).unwrap();
+        assert_eq!(
+            layout.page_keys(&tokens),
+            [
+                -2558115152377755722,
+                -5707059813888821707,
+                9074829146518922321
+            ]
+        );
+        // the trailing partial block never counts
+        assert_eq!(layout.page_keys(&tokens[..11]).len(), 2);
+        // the scheme cannot be recomputed without the worker's NONE_HASH
+        let config = RadixShmemRuntimeConfig {
+            none_hash: None,
+            ..config
+        };
+        assert!(Layout::from_config(&config).is_none());
+        assert!(shared_layout(&[(1, config)]).is_none());
     }
 
     #[test]

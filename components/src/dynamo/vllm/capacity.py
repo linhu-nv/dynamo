@@ -5,11 +5,21 @@ from __future__ import annotations
 
 import json
 import logging
+import os
 from typing import Any
 
+from vllm.utils.hashing import get_hash_fn_by_name
+from vllm.v1.core.kv_cache_utils import resolve_none_hash_seed
+
+from dynamo.common.radixshmem import dp_rank_endpoints, radixshmem_endpoint
 from dynamo.common.token_budget import TokenBudget, publish_token_budget
+from dynamo.vllm.kv_connector_protocols import MULTI_CONNECTOR_WRAPPERS
 
 logger = logging.getLogger(__name__)
+
+# FlexKV names its blocks by vLLM's own sha256_cbor block hashes, which the router
+# recomputes from request tokens.
+VLLM_SHA256_CBOR_I64_SCHEME = "vllm-sha256-cbor-i64-v1"
 
 
 def publish_vllm_token_budget(runtime_config: Any, max_model_len: int | None) -> None:
@@ -88,6 +98,57 @@ def _as_mapping(value: Any) -> dict[str, Any] | None:
     if hasattr(value, "__dict__"):
         return vars(value)
     return None
+
+
+def _uses_flexkv_connector(vllm_config: Any) -> bool:
+    kv_cfg = getattr(vllm_config, "kv_transfer_config", None)
+    if kv_cfg is None:
+        return False
+    if kv_cfg.kv_connector == "FlexKVConnectorV1":
+        return True
+    if kv_cfg.kv_connector in MULTI_CONNECTOR_WRAPPERS:
+        extra = kv_cfg.kv_connector_extra_config or {}
+        return any(
+            isinstance(entry, dict) and entry.get("kv_connector") == "FlexKVConnectorV1"
+            for entry in extra.get("connectors", [])
+        )
+    return False
+
+
+def get_radixshmem_runtime_data(
+    vllm_config: Any, dp_range: tuple[int, int]
+) -> dict[str, Any] | None:
+    """Runtime data for a router with ``--shared-cache-type radixshmem``
+    (see :mod:`dynamo.common.radixshmem`)."""
+    endpoint = radixshmem_endpoint()
+    if not endpoint or not _uses_flexkv_connector(vllm_config):
+        return None
+    hash_scheme = os.getenv("FLEXKV_HASH_SCHEME", "").strip()
+    algo = vllm_config.cache_config.prefix_caching_hash_algo
+    if hash_scheme != VLLM_SHA256_CBOR_I64_SCHEME or algo != "sha256_cbor":
+        logger.warning(
+            "DYN_RADIXSHMEM_KV_EVENTS_ENDPOINT is set but FlexKV does not name its "
+            "blocks by vLLM's block hashes (FLEXKV_HASH_SCHEME=%s with "
+            "--prefix-caching-hash-algo sha256_cbor): a router cannot match its placement",
+            VLLM_SHA256_CBOR_I64_SCHEME,
+        )
+        return None
+    hash_fn = get_hash_fn_by_name(algo)
+    data: dict[str, Any] = {
+        "page_size": int(vllm_config.cache_config.block_size),
+        "hash_scheme": hash_scheme,
+        # The parent hash of every request's first block, as the engine derives it.
+        "none_hash": hash_fn(resolve_none_hash_seed(hash_fn)).hex(),
+        "kv_events_endpoint": endpoint,
+    }
+    start, count = dp_range
+    per_node = max(1, int(vllm_config.parallel_config.data_parallel_size_local))
+    if count > per_node:
+        # vLLM places DP ranks on nodes in order, data_parallel_size_local per node.
+        ranks = dp_rank_endpoints(start + count, per_node, endpoint)
+        if ranks:
+            data["dp_rank_endpoints"] = ranks
+    return data
 
 
 def get_spec_decode_runtime_data(

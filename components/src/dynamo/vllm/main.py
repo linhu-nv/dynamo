@@ -29,6 +29,7 @@ from vllm.v1.metrics.prometheus import setup_multiprocess_prometheus
 from dynamo.common.config_dump import dump_config
 from dynamo.common.configuration.groups.router_args import build_router_config
 from dynamo.common.model_fetch import fetch_model, needs_local_model_path
+from dynamo.common.radixshmem import publish_radixshmem
 from dynamo.common.snapshot.lifecycle import elect_and_wake
 from dynamo.common.snapshot.restore_context import (
     parse_snapshot_restore_runtime_config,
@@ -72,6 +73,7 @@ from .backend_args import _configured_artifact_router_profile
 from .cache_info import get_configured_kv_event_block_size
 from .capacity import (
     get_metrics_model_name,
+    get_radixshmem_runtime_data,
     get_spec_decode_runtime_data,
     per_rank_kv_blocks,
     publish_vllm_token_budget,
@@ -1038,6 +1040,10 @@ async def register_vllm_model(
             SPEC_DECODE_RUNTIME_KEY, json.dumps(spec_decode)
         )
         logging.info("Published vLLM spec decode runtime metadata: %s", spec_decode)
+
+    radixshmem = get_radixshmem_runtime_data(vllm_config, dp_range)
+    if radixshmem is not None:
+        publish_radixshmem(runtime_config, radixshmem)
 
     # Set topology and KV transfer policy for topology-aware routing
     apply_topology_config(runtime_config, _worker_topology_config())
