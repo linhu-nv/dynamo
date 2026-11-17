@@ -655,3 +655,31 @@ def test_mooncake_runtime_data_describes_the_direct_linker(register):
 
     neither = SimpleNamespace(hicache_storage_backend=None)
     assert register._get_mooncake_runtime_data(neither) is None
+
+
+def test_radixshmem_runtime_data_maps_attention_dp_ranks_to_nodes(
+    register, monkeypatch
+):
+    monkeypatch.setenv("DYN_RADIXSHMEM_KV_EVENTS_ENDPOINT", "tcp://a:5891")
+    monkeypatch.setenv(
+        "DYN_RADIXSHMEM_KV_EVENTS_ENDPOINTS", "tcp://a:5891,tcp://b:5891"
+    )
+    monkeypatch.setenv("FLEXKV_HASH_SCHEME", "sglang-sha256-i64-v1")
+    server_args = SimpleNamespace(
+        enable_flexkv=True, page_size=64, nnodes=2, dp_size=1, attn_dp_size=4
+    )
+
+    assert register._get_radixshmem_runtime_data(server_args) == {
+        "page_size": 64,
+        "hash_scheme": "sglang-sha256-i64-v1",
+        "kv_events_endpoint": "tcp://a:5891",
+        "dp_rank_endpoints": [
+            "tcp://a:5891",
+            "tcp://a:5891",
+            "tcp://b:5891",
+            "tcp://b:5891",
+        ],
+    }
+
+    monkeypatch.delenv("FLEXKV_HASH_SCHEME")
+    assert register._get_radixshmem_runtime_data(server_args) is None

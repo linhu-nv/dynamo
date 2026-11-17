@@ -31,7 +31,8 @@ use dynamo_router_protocol::worker::WorkerId;
 use dynamo_scheduler::host::SharedKvCache;
 use dynamo_worker_selection::{SharedCacheHits, SharedCacheLocality, SharedCacheWorkerHosts};
 
-pub const SGLANG_FLEXKV_RADIXSHMEM_RUNTIME_KEY: &str = "sglang_flexkv_radixshmem";
+/// Runtime-data key of a worker's `RadixShmemRuntimeConfig`.
+pub const RADIXSHMEM_RUNTIME_KEY: &str = "radixshmem";
 /// The only scheme this client can recompute: SGLang's SHA-256 page chain,
 /// first 8 bytes as a big-endian signed integer (SGLang's `hash_str_to_int64`).
 pub const SGLANG_SHA256_I64_SCHEME: &str = "sglang-sha256-i64-v1";
@@ -441,9 +442,7 @@ fn config_from_runtime(
     worker_id: WorkerId,
     runtime_config: &ModelRuntimeConfig,
 ) -> Option<RadixShmemRuntimeConfig> {
-    match runtime_config
-        .get_engine_specific::<RadixShmemRuntimeConfig>(SGLANG_FLEXKV_RADIXSHMEM_RUNTIME_KEY)
-    {
+    match runtime_config.get_engine_specific::<RadixShmemRuntimeConfig>(RADIXSHMEM_RUNTIME_KEY) {
         Ok(config) => config,
         Err(error) => {
             tracing::warn!(worker_id, %error, "failed to parse radixshmem runtime config");
@@ -660,6 +659,25 @@ mod tests {
         assert_eq!(hosts[&1], vec![1]);
         assert_eq!(hosts[&2], vec![0, 0, 1, 1]);
         assert!(!hosts.contains_key(&3));
+    }
+
+    #[test]
+    fn reads_the_runtime_data_workers_publish() {
+        // As dynamo.common.radixshmem.publish_radixshmem writes it.
+        let mut runtime = ModelRuntimeConfig::default();
+        runtime
+            .set_engine_specific(
+                "radixshmem",
+                serde_json::json!({
+                    "page_size": 64,
+                    "hash_scheme": SGLANG_SHA256_I64_SCHEME,
+                    "kv_events_endpoint": "tcp://a",
+                }),
+            )
+            .unwrap();
+        let config = config_from_runtime(1, &runtime).unwrap();
+        assert_eq!(config.page_size, 64);
+        assert_eq!(config.kv_events_endpoint, "tcp://a");
     }
 
     #[test]
